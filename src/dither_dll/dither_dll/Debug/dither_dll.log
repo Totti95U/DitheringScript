@@ -1,6 +1,2 @@
 ﻿  dither_dll.cpp
-  dllmain.cpp
-  stdafx.cpp
-  コードを生成中...
-     ライブラリ G:\ユーザー\ToTTi\Desktop\dithering\DitheringScript\src\dither_dll\Debug\DITHERDLL.lib とオブジェクト G:\ユーザー\ToTTi\Desktop\dithering\DitheringScript\src\dither_dll\Debug\DITHERDLL.exp を作成中
-  dither_dll.vcxproj -> G:\ユーザー\ToTTi\Desktop\dithering\DitheringScript\src\dither_dll\Debug\DITHERDLL.dll
+  dither_dll.vcxproj -> G:\ユーザー\ToTTi\Desktop\dithering\DitheringScript\src\dither_dll\Debug\OrderedDithering.dll

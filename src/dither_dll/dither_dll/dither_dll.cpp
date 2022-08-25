@@ -6,6 +6,8 @@
 
 using namespace std;
 
+#define clip(x, a, b) max(min(x, b), a)
+
 // ピクセルのデータを扱いやすくするための構造体
 struct Pixel_RGBA {
 	unsigned char b;
@@ -21,7 +23,7 @@ struct Pixel_RGB {
 };
 
 // Bayer 行列 ( 8 * 8 )
-static const unsigned char M[8 * 8] = {
+static const int M[8 * 8] = {
 	 0,48,12,60, 3,51,15,63,
 	32,16,44,28,35,19,47,31,
 	 8,56, 4,52,11,59, 7,55,
@@ -32,7 +34,7 @@ static const unsigned char M[8 * 8] = {
 	42,26,38,22,41,25,37,21 };
 
 // W3C標準pallet
-static const unsigned char W3C[16][3] = {
+static const int W3C[16][3] = {
 	{0x00, 0x00, 0x00}, {0x80, 0x80, 0x80}, {0xc0, 0xc0, 0xc0}, {0xff, 0xff, 0xff},
 	{0x00, 0x00, 0xff}, {0x00, 0x00, 0x80}, {0x00, 0x80, 0x80}, {0x00, 0x80, 0x00},
 	{0x00, 0xff, 0x00}, {0x00, 0xff, 0xff}, {0xff, 0xff, 0x00}, {0xff, 0x00, 0x00},
@@ -40,13 +42,9 @@ static const unsigned char W3C[16][3] = {
 };
 
 // rgb_sp[red][green][blue]
-static int rgb_sp[16][16][16];
+static int rgb_sp[256][256][256];
 
-static int red_sp[16];
-static int green_sp[16];
-static int blue_sp[16];
-
-static unsigned char pallet[256][3];
+static int pallet[256][3];
 
 // ガンマ補正
 double gamma_correction(double vl) {
@@ -166,8 +164,8 @@ tuple<double, double, double> Lab2XYZ(double L, double a, double b) {
 tuple<double, double, double> RGB2XYZ(unsigned char r, unsigned char g, unsigned char b) {
 	double X, Y, Z;
 
-	tie(X, Y, Z) = RGB2lRGB(r, g, b);
-	tie(X, Y, Z) = lRGB2XYZ(X, Y, Z);
+	std::tie(X, Y, Z) = RGB2lRGB(r, g, b);
+	std::tie(X, Y, Z) = lRGB2XYZ(X, Y, Z);
 
 	return forward_as_tuple(X, Y, Z);
 }
@@ -177,8 +175,8 @@ tuple<unsigned char, unsigned char, unsigned char> XYZ2RGB(double X, double Y, d
 	double R, G, B;
 	unsigned char r, g, b;
 
-	tie(R, G, B) = XYZ2lRGB(X, Y, Z);
-	tie(r, g, b) = lRGB2RGB(R, G, B);
+	std::tie(R, G, B) = XYZ2lRGB(X, Y, Z);
+	std::tie(r, g, b) = lRGB2RGB(R, G, B);
 
 	return forward_as_tuple(r, g, b);
 }
@@ -187,9 +185,9 @@ tuple<unsigned char, unsigned char, unsigned char> XYZ2RGB(double X, double Y, d
 tuple<double, double, double> RGB2Lab(unsigned char r, unsigned char g, unsigned char b) {
 	double L, A, B;
 
-	tie(L, A, B) = RGB2lRGB(r, g, b);
-	tie(L, A, B) = lRGB2XYZ(L, A, B);
-	tie(L, A, B) = XYZ2Lab(L, A, B);
+	std::tie(L, A, B) = RGB2lRGB(r, g, b);
+	std::tie(L, A, B) = lRGB2XYZ(L, A, B);
+	std::tie(L, A, B) = XYZ2Lab(L, A, B);
 
 	return forward_as_tuple(L, A, B);
 }
@@ -199,19 +197,19 @@ tuple<unsigned char, unsigned char, unsigned char> Lab2RGB(double L, double A, d
 	double lR, lG, lB;
 	unsigned char r, g, b;
 
-	tie(lR, lG, lB) = Lab2XYZ(L, A, B);
-	tie(lR, lG, lB) = XYZ2lRGB(lR, lG, lB);
-	tie(r, g, b) = lRGB2RGB(lR, lG, lB);
+	std::tie(lR, lG, lB) = Lab2XYZ(L, A, B);
+	std::tie(lR, lG, lB) = XYZ2lRGB(lR, lG, lB);
+	std::tie(r, g, b) = lRGB2RGB(lR, lG, lB);
 
 	return forward_as_tuple(r, g, b);
 }
 
-double get_luminance(unsigned r, unsigned g, unsigned b) {
-	return (r * 299 + g * 587 + b * 114) / (255.0 * 1000);
+double get_luminance(int r, int g, int b) {
+	return (r * 299.0 + g * 587.0 + b * 114.0) / (255.0 * 1000);
 }
 
 // CCIR 601 に基づく
-double color_difference(unsigned r1, unsigned g1, unsigned b1, unsigned r2, unsigned g2, unsigned b2) {
+double color_difference(int r1, int g1, int b1, int r2, int g2, int b2) {
 	double luma1 = get_luminance(r1, g1, b1);
 	double luma2 = get_luminance(r2, g2, b2);
 	double lumadiff = luma1 - luma2;
@@ -244,200 +242,190 @@ int simpleDither(lua_State *L) {
 	return 0;
 }
 
-// メディアンカットによる減色
-void medianCut(unsigned int N) {
-	int rm, rM, gm, gM, bm, bM, pixel_num = 0;
-	queue<int> q;
+// メディアンカットによる減色(パレットの作成)
+void medianCut(int N, int pixel_n) {
+	int rm = 0xff, rM = 0, gm = 0xff, gM = 0, bm = 0xff, bM = 0, rMed = 0xff, gMed = 0xff, bMed = 0xff, rl, gl, bl;
+	int boxes[256][7]; // boexes[i][0] = rm, boexes[i][1] = rM, boexes[i][2] = gm, boexes[i][3] = gM, boexes[i][4] = bm, boexes[i][5] = bM, 
+	int count = 0;
+	int div_pos;
+	int rsum = 0, gsum = 0, bsum = 0, volume = 0;
+
+	// boxes の初期化
+	boxes[0][0] = 0; boxes[0][2] = 0; boxes[0][4] = 0;
+	boxes[0][1] = 0xff; boxes[0][3] = 0xff; boxes[0][5] = 0xff;
+	boxes[0][6] = pixel_n;
 	
-	// rm, rM の決定
-	for (int r = 0x0; r <= 0xf; r++) {
-		if (red_sp[r] > 0) {
-			rm = r;
-			break;
-		}
-	}
-	for (int r = 0xf; r >= 0x0; r--) {
-		if (red_sp[r] > 0) {
-			rM = r;
-			break;
+	for (int n = 0; n < N; n++) {
+		for (int i = 0; i < (1 << n); i++){
+			// 辺の長さを測る & Med を求める
+			rm = 0xff;
+			rM = 0;
+			
+			gm = 0xff;
+			gM = 0;
+			
+			bm = 0xff;
+			bM = 0;
+			
+			count = 0;
+			for (int r = boxes[i][0]; r < boxes[i][1]; r++) {
+				for (int g = boxes[i][2]; g < boxes[i][3]; g++) {
+					for (int b = boxes[i][4]; b < boxes[i][5]; b++) {
+						if (rgb_sp[r][g][b] > 0) {
+							rm = min(rm, r);
+							rM = max(rM, r);
+
+							gm = min(gm, g);
+							gM = max(gM, g);
+
+							bm = min(bm, b);
+							bM = max(bM, b);
+						}
+					}
+				}
+			}
+
+			// boxes[i]を中央値で分割する
+			rl = rM - rm;
+			gl = gM - gm;
+			bl = bM - bm;
+
+			div_pos = i + (1 << n);
+
+			count = 0;
+			if (rl >= gl && rl * 1.2 >= bl) {
+
+				for (int r = rm; r < rM; r++) {
+					for (int g = gm; g < gM; g++) {
+						for (int b = bm; b < bM; b++) {
+							count += rgb_sp[r][g][b];
+						}
+					}
+					if (count >= boxes[i][6] / 2) {
+						rMed = r;
+						break;
+					}
+				}
+
+				// まず移植
+				boxes[div_pos][0] = rMed;
+				boxes[div_pos][1] = rM;
+				boxes[div_pos][2] = gm;
+				boxes[div_pos][3] = gM;
+				boxes[div_pos][4] = bm;
+				boxes[div_pos][5] = bM;
+
+				// オリジナルを修正
+				boxes[i][0] = rm;
+				boxes[i][1] = rMed;
+				boxes[i][2] = gm;
+				boxes[i][3] = gM;
+				boxes[i][4] = bm;
+				boxes[i][5] = bM;
+			}
+			else if (gl * 1.2 >= bl) {
+				for (int g = gm; g < gM; g++) {
+					for (int r = rm; r < rM; r++) {
+						for (int b = bm; b < bM; b++) {
+							count += rgb_sp[r][g][b];
+						}
+					}
+					if (count >= boxes[i][6] / 2) {
+						gMed = g;
+						break;
+					}
+				}
+				
+				// まず移植
+				boxes[div_pos][0] = rm;
+				boxes[div_pos][1] = rM;
+				boxes[div_pos][2] = gMed;
+				boxes[div_pos][3] = gM;
+				boxes[div_pos][4] = bm;
+				boxes[div_pos][5] = bM;
+
+				// オリジナルを修正
+				boxes[i][0] = rm;
+				boxes[i][1] = rM;
+				boxes[i][2] = gm;
+				boxes[i][3] = gMed;
+				boxes[i][4] = bm;
+				boxes[i][5] = bM;
+			}
+			else {
+				for (int b = bm; b < bM; b++) {
+					for (int g = gm; g < gM; g++) {
+						for (int r = rm; r < rM; r++) {
+							count += rgb_sp[r][g][b];
+						}
+					}
+					if (count >= boxes[i][6] / 2) {
+						bMed = b;
+						break;
+					}
+				}
+				
+				// まず移植
+				boxes[div_pos][0] = rm;
+				boxes[div_pos][1] = rM;
+				boxes[div_pos][2] = gm;
+				boxes[div_pos][3] = gM;
+				boxes[div_pos][4] = bMed;
+				boxes[div_pos][5] = bM;
+
+				// オリジナルを修正
+				boxes[i][0] = rm;
+				boxes[i][1] = rM;
+				boxes[i][2] = gm;
+				boxes[i][3] = gM;
+				boxes[i][4] = bm;
+				boxes[i][5] = bMed;
+			}
+			boxes[div_pos][6] = boxes[i][6] - count;
+			boxes[i][6] = count;
 		}
 	}
 
-	// gm, gM の決定
-	for (int g = 0x0; g <= 0xf; g++) {
-		if (green_sp[g] > 0) {
-			gm = g;
-			break;
-		}
-	}
-	for (int g = 0xf; g >= 0x0; g--) {
-		if (green_sp[g] > 0) {
-			gM = g;
-			break;
-		}
-	}
-
-	// bm, bM の決定
-	for (int b = 0x0; b <= 0xf; b++) {
-		if (blue_sp[b] > 0) {
-			bm = b;
-			break;
-		}
-	}
-	for (int b = 0xf; b >= 0x0; b--) {
-		if (blue_sp[b] > 0) {
-			bM = b;
-			break;
-		}
-	}
-
-	// pixel_num の決定
-	for (int r = 0x0; r <= 0xf; r++) {
-		pixel_num += red_sp[r];
-	}
-
-	q.push(rm); q.push(rM); q.push(gm); q.push(gM); q.push(bm); q.push(bM); q.push(pixel_num);
+	// パレットを作成する
 	
-	// 分割数が n を越えるまで分割
-	while (q.size() < 7 * N) {
-		rm = q.front(); q.pop(); rM = q.front(); q.pop();
-		gm = q.front(); q.pop(); gM = q.front(); q.pop();
-		bm = q.front(); q.pop(); bM = q.front(); q.pop();
-		pixel_num = q.front(); q.pop();
-
-		// r が最長のとき
-		if (rM - rm >= 1.2 * (gM - gm) && rM - rm >= 1.2 * (bM - bm)) {
-			unsigned char rmed, rMed;
-			int c = 0, C = 0;
-
-			for (int r = rm; r <= rM; r++) {
-				for (int g = gm; g <= gM; g++) {
-					for (int b = bm; b <= bM; b++) {
-						c += rgb_sp[r][g][b];
-					}
-				}
-				if (c >= pixel_num / 2) {
-					rmed = static_cast<unsigned char>(r);
-					break;
-				}
-			}
-			for (int r = rM; r >= rm; r--) {
-				for (int g = gM; g >= gm; g--) {
-					for (int b = bM; b >= bm; b--) {
-						C += rgb_sp[r][g][b];
-					}
-				}
-				if (C >= pixel_num / 2) {
-					rMed = static_cast<unsigned char>(r);
-					break;
-				}
-			}
-
-			q.push(rm); q.push(rmed); q.push(gm); q.push(gM); q.push(bm); q.push(bM); q.push(c);
-			q.push(rMed); q.push(rM); q.push(gm); q.push(gM); q.push(bm); q.push(bM); q.push(C);
-		}
-		// g が最長のとき
-		else if (gM - gm >= bM - bm) {
-			unsigned char gmed, gMed;
-			int c = 0, C = 0;
-
-			for (int g = gm; g <= gM; g++) {
-				for (int b = bm; b <= bM; b++) {
-					for (int r = rm; r <= rM; r++) {
-						c += rgb_sp[r][g][b];
-					}
-				}
-				if (c >= pixel_num / 2) {
-					gmed = static_cast<unsigned char>(g);
-					break;
-				}
-			}
-			for (int g = gM; g >= gm; g--) {
-				for (int b = bM; b >= bm; b--) {
-					for (int r = rM; r >= rm; r--) {
-						C += rgb_sp[r][g][b];
-					}
-				}
-				if (C >= pixel_num / 2) {
-					gMed = static_cast<unsigned char>(g);
-					break;
-				}
-			}
-
-			q.push(rm); q.push(rM); q.push(gm); q.push(gmed); q.push(bm); q.push(bM); q.push(c);
-			q.push(rm); q.push(rM); q.push(gMed); q.push(gM); q.push(bm); q.push(bM); q.push(C);
-		}
-		// b が最長の時
-		else {
-			unsigned char bmed, bMed;
-			int c = 0, C = 0;
-
-			for (int b = bm; b <= bM; b++) {
-				for (int r = rm; r <= rM; r++) {
-					for (int g = gm; g <= gM; g++) {
-						c += rgb_sp[r][g][b];
-					}
-				}
-				if (c >= pixel_num / 2) {
-					bmed = static_cast<unsigned char>(b);
-					break;
-				}
-			}
-			for (int b = bM; b >= bm; b--) {
-				for (int r = rM; r >= rm; r--) {
-					for (int g = gM; g >= gm; g--) {
-						C += rgb_sp[r][g][b];
-					}
-				}
-				if (C >= pixel_num / 2) {
-					bMed = static_cast<unsigned char>(b);
-					break;
-				}
-			}
-
-			q.push(rm); q.push(rM); q.push(gm); q.push(gM); q.push(bm); q.push(bmed); q.push(c);
-			q.push(rm); q.push(rM); q.push(gm); q.push(gM); q.push(bMed); q.push(bM); q.push(C);
-		}
-	}
-
-	// パレットを作る
-	for (unsigned int n = 0; n < N; n++) {
-		double X = 0, Y = 0, Z = 0;
-		unsigned char ToReturn_rgb[3];
-
-		rm = q.front(); q.pop(); rM = q.front(); q.pop();
-		gm = q.front(); q.pop(); gM = q.front(); q.pop();
-		bm = q.front(); q.pop(); bM = q.front(); q.pop();
-		pixel_num = q.front();  q.pop();
+	for (int i = 0; i < (1 << N); i++) {
 		
-		if (pixel_num == 0) continue;
-
-		for (int r = rm; r <= rM; r++) {
-			for (int g = gm; g <= gM; g++) {
-				for (int b = bm; b <= bM; b++) {
-					double x, y, z;
-					tie(x, y, z) = lRGB2XYZ(r / 15.0, g / 15.0, b / 15.0);
-					X += x * rgb_sp[r][g][b];
-					Y += y * rgb_sp[r][g][b];
-					Z += z * rgb_sp[r][g][b];
+		rsum = 0;
+		gsum = 0;
+		bsum = 0;
+		volume = 0;
+		for (int r = boxes[i][0]; r < boxes[i][1]; r++) {
+			for (int g = boxes[i][2]; g < boxes[i][3]; g++) {
+				for (int b = boxes[i][4]; b < boxes[i][5]; b++) {
+					rsum += r * rgb_sp[r][g][b];
+					gsum += g * rgb_sp[r][g][b];
+					bsum += b * rgb_sp[r][g][b];
+					volume += rgb_sp[r][g][b];
 				}
 			}
 		}
 
-		tie(ToReturn_rgb[0], ToReturn_rgb[1], ToReturn_rgb[2]) = XYZ2RGB(X / pixel_num, Y / pixel_num, Z / pixel_num);
 		
-		pallet[n][0] = static_cast<unsigned char>(ToReturn_rgb[0]);
-		pallet[n][1] = static_cast<unsigned char>(ToReturn_rgb[1]);
-		pallet[n][2] = static_cast<unsigned char>(ToReturn_rgb[2]);
+		volume = max(1, volume);
+		rsum /= volume;
+		rsum = clip(rsum, 0, 0xff);
+		gsum /= volume;
+		gsum = clip(gsum, 0, 0xff);
+		bsum /= volume;
+		bsum = clip(bsum, 0, 0xff);
+		
+		pallet[i][0] = rsum;
+		pallet[i][1] = gsum;
+		pallet[i][2] = bsum;
 	}
 }
 
 // pallet で一番近い色を選ぶ
 tuple<unsigned char, unsigned char, unsigned char> BestColor(unsigned char r, unsigned char g, unsigned char b, int N) {
-	unsigned char best_rgb[3] = { pallet[0][0], pallet[0][1], pallet[0][2] };
-	double best_dist = 256.0;
+	int best_rgb[3] = { pallet[0][0], pallet[0][1], pallet[0][2] };
+	double best_dist = 256.0 * 256.0 * 256.0;
 
-	for (int n = 1; n < N; n++) {
+	for (int n = 0; n < 1 << N; n++) {
 		double current_dist;
 
 		current_dist = color_difference(r, g, b, pallet[n][0], pallet[n][1], pallet[n][2]);
@@ -455,10 +443,10 @@ tuple<unsigned char, unsigned char, unsigned char> BestColor(unsigned char r, un
 
 // W3Cで一番近い色を選ぶ
 tuple<unsigned char, unsigned char, unsigned char> Color2W3C(unsigned char r, unsigned char g, unsigned char b) {
-	unsigned char best_rgb[3] = { W3C[0][0], W3C[0][1], W3C[0][2] };
+	int best_rgb[3] = { W3C[0][0], W3C[0][1], W3C[0][2] };
 	double best_dist = 256.0;
 
-	for (int n = 1; n < 16; n++) {
+	for (int n = 0; n < 16; n++) {
 		double current_dist;
 
 		current_dist = color_difference(r, g, b, W3C[n][0], W3C[n][1], W3C[n][2]);
@@ -483,42 +471,36 @@ int degreaseColor(lua_State *L) {
 	int N = static_cast<int>(lua_tointeger(L, 4));
 
 	// rgb_sp を設定
-	for (int i = 0; i < 16; i++) {
-		red_sp[i] = 0;
-		green_sp[i] = 0;
-		blue_sp[i] = 0;
-	}
-	for (int R = 0; R < 16; R++) {
-		for (int G = 0; G < 16; G++) {
-			for (int B = 0; B < 16; B++) {
+	for (int R = 0; R < 0xff; R++) {
+		for (int G = 0; G < 0xff; G++) {
+			for (int B = 0; B < 0xff; B++) {
 				rgb_sp[R][G][B] = 0;
 			}
 		}
 	}
+
 	for (int y = 0; y < h; y++) {
 		for (int x = 0; x < w; x++) {
 			int index = x + w * y;
 			unsigned char R, G, B;
-			double dR, dG, dB;
-
-			tie(dR, dG, dB) = RGB2lRGB(pixels[index].r, pixels[index].g, pixels[index].b);
-			R = static_cast<unsigned char>(15 * dR);
-			G = static_cast<unsigned char>(15 * dG);
-			B = static_cast<unsigned char>(15 * dB);
+			
+			R = pixels[index].r;
+			G = pixels[index].g;
+			B = pixels[index].b;
 
 			rgb_sp[R][G][B]++;
 		}
 	}
 
-	medianCut(N);
+	medianCut(N, w * h);
 
 	// forループで全ピクセルを処理
 	// xが内側なのは横に操作した方がメモリの効率がよさそうだから
 	for (int y = 0; y < h; y++) {
 		for (int x = 0; x < w; x++) {
 			int index = x + w * y;
-
-			tie(pixels[index].r, pixels[index].g, pixels[index].b) = BestColor(pixels[index].r, pixels[index].g, pixels[index].b, N);
+			
+			std::tie(pixels[index].r, pixels[index].g, pixels[index].b) = BestColor(pixels[index].r, pixels[index].g, pixels[index].b, N);
 		}
 	}
 
@@ -540,7 +522,7 @@ int degrease2W3C(lua_State *L) {
 		for (int x = 0; x < w; x++) {
 			int index = x + w * y;
 
-			tie(pixels[index].r, pixels[index].g, pixels[index].b) = Color2W3C(pixels[index].r, pixels[index].g, pixels[index].b);
+			std::tie(pixels[index].r, pixels[index].g, pixels[index].b) = Color2W3C(pixels[index].r, pixels[index].g, pixels[index].b);
 		}
 	}
 
@@ -563,7 +545,7 @@ int ditherComposer(lua_State *L) {
 			int index = x + w * y;
 			int peindex = (x % 8) + 8 * (y % 8);
 
-			pixels[index].a = (1 - alpha) * pixels[index].a > 4 * M[peindex] + 2 ? 0xff : 0x00;
+			pixels[index].a = (1.0 - alpha) * static_cast<int>(pixels[index].a) > M[peindex] * 4 + 2 ? 0xff : 0x00;
 		}
 	}
 
@@ -582,40 +564,28 @@ int patternDither(lua_State *L) {
 
 	// Median cut によりパレットを生成
 	// rgb_sp を初期化
-	for (int i = 0; i < 16; i++) {
-		red_sp[i] = 0;
-		green_sp[i] = 0;
-		blue_sp[i] = 0;
-	}
-	for (int R = 0; R < 16; R++) {
-		for (int G = 0; G < 16; G++) {
-			for (int B = 0; B < 16; B++) {
+	for (int R = 0; R < 0xff; R++) {
+		for (int G = 0; G < 0xff; G++) {
+			for (int B = 0; B < 0xff; B++) {
 				rgb_sp[R][G][B] = 0;
 			}
 		}
 	}
+
 	for (int y = 0; y < h; y++) {
 		for (int x = 0; x < w; x++) {
 			int index = x + w * y;
 			unsigned char R, G, B;
-			double dR, dG, dB;
 
-			if (pixels[index].a == 0) break;
-
-			tie(dR, dG, dB) = RGB2lRGB(pixels[index].r, pixels[index].g, pixels[index].b);
-
-			R = static_cast<unsigned char>(15 * dR);
-			G = static_cast<unsigned char>(15 * dG);
-			B = static_cast<unsigned char>(15 * dB);
+			R = pixels[index].r;
+			G = pixels[index].g;
+			B = pixels[index].b;
 			
-			rgb_sp[R][G][B]++;
-			red_sp[R]++;
-			green_sp[G]++;
-			blue_sp[B]++;
+			rgb_sp[R][G][B] += 1;
 		}
 	}
 
-	medianCut(N);
+	medianCut(N, w * h);
 
 	// forループで全ピクセルを処理
 	// xが内側なのは横に操作した方がメモリの効率がよさそうだから
@@ -634,15 +604,12 @@ int patternDither(lua_State *L) {
 				attempt.b = static_cast<int>(1.0 * pixels[index].b - color_error.b * threshold);
 				
 				// Bumping
-				attempt.r = attempt.r > 0x00 ? attempt.r : 0x00;
-				attempt.r = attempt.r < 0xff ? attempt.r : 0xff;
-				attempt.g = attempt.g > 0x00 ? attempt.g : 0x00;
-				attempt.g = attempt.g < 0xff ? attempt.g : 0xff;
-				attempt.b = attempt.b > 0x00 ? attempt.b : 0x00;
-				attempt.b = attempt.b < 0xff ? attempt.b : 0xff;
+				attempt.r = clip(attempt.r, 0, 0xff);
+				attempt.g = clip(attempt.g, 0, 0xff);
+				attempt.b = clip(attempt.b, 0, 0xff);
 
 				Pixel_RGBA candidate = { 0 ,0 ,0, 0 };
-				tie(candidate.r, candidate.g, candidate.b) = BestColor(attempt.r, attempt.g, attempt.b, N);
+				std::tie(candidate.r, candidate.g, candidate.b) = BestColor(attempt.r, attempt.g, attempt.b, N);
 				candidate_list.push_back(candidate);
 				color_error.r = candidate.r - pixels[index].r;
 				color_error.g = candidate.g - pixels[index].g;
