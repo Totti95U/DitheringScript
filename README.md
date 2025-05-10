@@ -1,4 +1,13 @@
 # DitheringScript
+
+## 重要なお知らせ
+
+**プログラムを一新したバージョンを公開したので、こちらのリポジトリはアーカイブにしました**
+
+**新しいバージョンは[コチラから](https://github.com/Totti95U/aviutl-dither-script)**
+
+---
+
 配列ディザリング (パターンディザリング) を行う AviUtl のスクリプトです。
 
 ダウンロードは[コチラ](https://github.com/Totti95U/DitheringScript/releases)
